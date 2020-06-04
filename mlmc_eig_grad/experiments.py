@@ -25,6 +25,14 @@ def expr_test():
     xi = [1, 1]
     mlmc_eig.bias_variance_check_and_graph(
         models.model_t,
+        mlmc_eig.mlmc_eig_value,
+        num_sample,
+        num_level,
+        xi,
+        "eig_value_test",
+    )
+    mlmc_eig.bias_variance_check_and_graph(
+        models.model_t,
         mlmc_eig.mlmc_eig_grad,
         num_sample,
         num_level,

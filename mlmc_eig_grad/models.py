@@ -223,3 +223,4 @@ def show_xi(xi, scale, filename):
 
     plt.savefig(filename + ".eps")
     print("The graph has been saved at [" + filename + ".eps].")
+    plt.close()

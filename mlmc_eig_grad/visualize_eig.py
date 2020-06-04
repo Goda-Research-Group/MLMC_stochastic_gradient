@@ -31,3 +31,4 @@ def eig_with_path(paths, labels, n_step, n_sample, filename):
 
     plt.savefig(filename + ".eps")
     print("The graphs has been saved at [" + filename + ".eps].")
+    plt.close()

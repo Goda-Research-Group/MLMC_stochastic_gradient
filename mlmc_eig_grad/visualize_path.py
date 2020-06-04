@@ -53,3 +53,4 @@ def contour_and_paths(eig_func, paths, labels, left, right, bottom, top, filenam
 
     plt.savefig(filename + ".eps")
     print("The graphs has been saved at [" + filename + ".eps].")
+    plt.close()

@@ -9,6 +9,8 @@ from numpy.random import PCG64, RandomState, SeedSequence
 
 use_multiprocess = True
 num_process = mp.cpu_count()
+if num_process > 8:
+    num_process = 8
 
 seed_sequence = SeedSequence(123456)
 random_state_outerloop = RandomState(PCG64(seed_sequence.spawn(1)[0]))
@@ -38,7 +40,7 @@ def mlmc_eig_value_and_grad(model, is_level_0, M, N, xi):
     global mlmc_eig_calc_innerloop
 
     def mlmc_eig_calc_innerloop(args):
-        y, theta, M, seed = args
+        y, theta, M, seed, is_level_0 = args
 
         random_state_inner = RandomState(PCG64(seed))
         theta = theta[np.newaxis, :]
@@ -58,15 +60,89 @@ def mlmc_eig_value_and_grad(model, is_level_0, M, N, xi):
                 / q.pdf(theta_inner)
             )
         else:
+            q = np.nan
             theta_inner = dist_theta.rvs(size=M, random_state=random_state_inner)
             if M <= 1:
                 theta_inner = theta_inner[np.newaxis, :]
             p = dist_epsilon.pdf(y - g(theta_inner, xi))
-        p_overline = p.mean()
-        p_overline_a = p[: int(M / 2)].mean() if M > 1 else np.nan
-        p_overline_b = p[int(M / 2) :].mean() if M > 1 else np.nan
 
-        return (p_overline, p_overline_a, p_overline_b)
+        if (
+            is_level_0
+            and p.mean() > 0
+            or not is_level_0
+            and p[: int(M / 2)].mean() > 0
+            and p[int(M / 2) :].mean() > 0
+        ):
+            log_p_overline = np.log(p.mean())
+            log_p_overline_a = (
+                np.log(p[: int(M / 2)].mean()) if not is_level_0 else np.nan
+            )
+            log_p_overline_b = (
+                np.log(p[int(M / 2) :].mean()) if not is_level_0 else np.nan
+            )
+        else:
+            e_det = np.linalg.det(dist_epsilon.cov)
+            y_dim = len(y)
+            expornents = (
+                -np.sum(
+                    (y - g(theta_inner, xi))
+                    * ((y - g(theta_inner, xi)) @ Sigma_epsilon_I),
+                    axis=1,
+                )
+                / 2
+            )
+            if use_importance_sampling:
+                expornents += (
+                    -np.sum(
+                        (theta_inner - dist_theta.mean)
+                        * (
+                            (theta_inner - dist_theta.mean)
+                            @ np.linalg.inv(dist_theta.cov)
+                        ),
+                        axis=1,
+                    )
+                    / 2
+                )
+                expornents -= (
+                    -np.sum(
+                        (theta_inner - q.mean)
+                        * ((theta_inner - q.mean) @ np.linalg.inv(q.cov)),
+                        axis=1,
+                    )
+                    / 2
+                )
+            log_p_overline = logsumexp(expornents, use_importance_sampling, q)
+            log_p_overline_a = (
+                logsumexp(expornents[: int(M / 2)], use_importance_sampling, q)
+                if not is_level_0
+                else np.nan
+            )
+            log_p_overline_b = (
+                logsumexp(expornents[int(M / 2) :], use_importance_sampling, q)
+                if not is_level_0
+                else np.nan
+            )
+
+        return (log_p_overline, log_p_overline_a, log_p_overline_b)
+
+    global logsumexp
+
+    def logsumexp(r, use_importance_sampling, q):
+        r_max = np.max(r)
+        r_ = r - r_max
+        log_p_overline = (
+            -np.log(len(r_))
+            - y_dim / 2 * np.log(2 * np.pi)
+            - np.log(e_det) / 2
+            + r_max
+            + np.log(np.sum(np.exp(r_)))
+        )
+        if use_importance_sampling:
+            log_p_overline += (
+                -np.log(np.linalg.det(dist_theta.cov)) / 2
+                + np.log(np.linalg.det(q.cov)) / 2
+            )
+        return log_p_overline
 
     global mlmc_eig_laplace_approximation
 
@@ -100,28 +176,30 @@ def mlmc_eig_value_and_grad(model, is_level_0, M, N, xi):
     y = g(theta, xi) + epsilon
     dy = ggrad(theta, xi)
 
-    innerloop_args = zip(y, theta, np.repeat(M, N), seed_sequence.spawn(N))
+    innerloop_args = zip(
+        y, theta, np.repeat(M, N), seed_sequence.spawn(N), np.repeat(is_level_0, N)
+    )
     if use_multiprocess:
         pool = mp.Pool(num_process)
-        p_overline, p_overline_a, p_overline_b = np.array(
+        log_p_overline, log_p_overline_a, log_p_overline_b = np.array(
             pool.map(mlmc_eig_calc_innerloop, innerloop_args)
         ).T
         pool.close()
     else:
-        p_overline, p_overline_a, p_overline_b = np.array(
+        log_p_overline, log_p_overline_a, log_p_overline_b = np.array(
             list(map(mlmc_eig_calc_innerloop, innerloop_args))
         ).T
 
     nabla_log_p = (dy * ((Sigma_epsilon_I @ epsilon[:, :, np.newaxis]))).sum(axis=1)
 
-    P_l_eig = np.log(dist_epsilon.pdf(epsilon)) - np.log(p_overline)
+    P_l_eig = np.log(dist_epsilon.pdf(epsilon)) - log_p_overline
     P_l_eig_grad = (P_l_eig - eta)[:, np.newaxis] * nabla_log_p
 
     if is_level_0:
         Z_l_eig = P_l_eig
         Z_l_eig_grad = (Z_l_eig - eta)[:, np.newaxis] * nabla_log_p
     else:
-        Z_l_eig = (np.log(p_overline_a) + np.log(p_overline_b)) / 2 - np.log(p_overline)
+        Z_l_eig = (log_p_overline_a + log_p_overline_b) / 2 - log_p_overline
         Z_l_eig_grad = Z_l_eig[:, np.newaxis] * nabla_log_p
 
     return P_l_eig, Z_l_eig, P_l_eig_grad, Z_l_eig_grad
@@ -191,6 +269,7 @@ def bias_variance_check_and_graph(model, mlmc_fn, N, L, xi, filename):
     variance_check_graph(True, ax2, E2_P_List, E2_Z_List, "E2")
     plt.savefig(filename + ".eps")
     print("The graph has been saved at [" + filename + ".eps].")
+    plt.close()
 
 
 # Implementation for Randomized MLMC
@@ -246,3 +325,4 @@ def variance_check_with_path(model, mlmc_fn, N, L, history, filename):
 
     plt.savefig(filename + ".eps")
     print("The graphs has been saved at [" + filename + ".eps].")
+    plt.close()
