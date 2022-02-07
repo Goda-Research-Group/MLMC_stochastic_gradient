@@ -2,7 +2,7 @@
 
 ## Overview
 
-The codes used for the numerical experiments in the paper(https://arxiv.org/abs/2005.08414)
+The codes used for the numerical experiments in the paper(https://doi.org/10.1137/20M1338848).
 
 ## Usage
 
